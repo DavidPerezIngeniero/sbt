@@ -19,6 +19,7 @@ private[sbt] final class TaskTimings(shutdown: Boolean) extends ExecuteProgress[
   private[this] var start = 0L
   private[this] val divider = java.lang.Integer.getInteger("sbt.task.timings.divider", 6).toInt
   private[this] val threshold = java.lang.Long.getLong("sbt.task.timings.threshold", 0L)
+  private[this] val omitPaths = java.lang.Boolean.getBoolean("sbt.task.timings.omit.paths")
   private[this] val unit = divider match {
     case 0 => "ns"
     case 3 => "µs"
@@ -54,6 +55,8 @@ private[sbt] final class TaskTimings(shutdown: Boolean) extends ExecuteProgress[
     if (!shutdown)
       report()
 
+  private val reFilePath = raw"\{[^}]+\}".r
+
   private[this] def report() = {
     val total = divide(System.nanoTime - start)
     println(s"Total time: $total $unit")
@@ -61,8 +64,10 @@ private[sbt] final class TaskTimings(shutdown: Boolean) extends ExecuteProgress[
     def sumTimes(in: Seq[(Task[_], Long)]) = in.map(_._2).sum
     val timingsByName = timings.toSeq.groupBy { case (t, time) => mappedName(t) } mapValues (sumTimes)
     val times = timingsByName.toSeq.sortBy(_._2).reverse
-      .map { case (name, time) => (name, divide(time)) }
-      .filter { _._2 > threshold }
+      .map {
+        case (name, time) =>
+          (if (omitPaths) reFilePath.replaceFirstIn(name, "") else name, divide(time))
+      }.filter { _._2 > threshold }
     if (times.size > 0) {
       val maxTaskNameLength = times.map { _._1.length }.max
       val maxTime = times.map { _._2 }.max.toString.length
