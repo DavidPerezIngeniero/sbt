@@ -2,6 +2,8 @@ import sbt._
 import Keys._
 import Def.Initialize
 
+import scala.language.reflectiveCalls
+
 object Scripted {
   def scriptedPath = file("scripted")
   lazy val scripted = InputKey[Unit]("scripted")
@@ -17,10 +19,11 @@ object Scripted {
   case class ScriptedTestPage(page: Int, total: Int)
   def scriptedParser(scriptedBase: File): Parser[Seq[String]] =
     {
-      val pairs = (scriptedBase * AllPassFilter * AllPassFilter * "test").get map { (f: File) =>
+      val scriptedFiles: NameFilter = ("test": NameFilter) | "pending"
+      val pairs = (scriptedBase * AllPassFilter * AllPassFilter * scriptedFiles).get map { (f: File) =>
         val p = f.getParentFile
         (p.getParentFile.getName, p.getName)
-      };
+      }
       val pairMap = pairs.groupBy(_._1).mapValues(_.map(_._2).toSet);
 
       val id = charClass(c => !c.isWhitespace && c != '/').+.string
@@ -57,15 +60,30 @@ object Scripted {
       (token(Space) ~> (PagedIds | testIdAsGroup)).* map (_.flatten)
     }
 
-  def doScripted(launcher: File, scriptedSbtClasspath: Seq[Attributed[File]], scriptedSbtInstance: ScalaInstance, sourcePath: File, args: Seq[String], prescripted: File => Unit) {
+  // Interface to cross class loader
+  type SbtScriptedRunner = {
+    def run(resourceBaseDirectory: File, bufferLog: Boolean, tests: Array[String], bootProperties: File,
+      launchOpts: Array[String], prescripted: java.util.List[File]): Unit
+  }
+
+  def doScripted(launcher: File, scriptedSbtClasspath: Seq[Attributed[File]], scriptedSbtInstance: ScalaInstance, sourcePath: File, args: Seq[String], prescripted: File => Unit): Unit = {
     System.err.println(s"About to run tests: ${args.mkString("\n * ", "\n * ", "\n")}")
     val noJLine = new classpath.FilteredLoader(scriptedSbtInstance.loader, "jline." :: Nil)
     val loader = classpath.ClasspathUtilities.toLoader(scriptedSbtClasspath.files, noJLine)
-    val m = ModuleUtilities.getObject("sbt.test.ScriptedTests", loader)
-    val r = m.getClass.getMethod("run", classOf[File], classOf[Boolean], classOf[Array[String]], classOf[File], classOf[Array[String]], classOf[File => Unit])
+    val bridgeClass = Class.forName("sbt.test.ScriptedRunner", true, loader)
+    val bridge = bridgeClass.newInstance.asInstanceOf[SbtScriptedRunner]
     val launcherVmOptions = Array("-XX:MaxPermSize=256M") // increased after a failure in scripted source-dependencies/macro
-    try { r.invoke(m, sourcePath, true: java.lang.Boolean, args.toArray[String], launcher, launcherVmOptions, prescripted) }
-    catch { case ite: java.lang.reflect.InvocationTargetException => throw ite.getCause }
+    try {
+      // Using java.util.List to encode File => Unit.
+      val callback = new java.util.AbstractList[File] {
+        override def add(x: File): Boolean = {
+          prescripted(x)
+          false
+        }
+        def get(x: Int): sbt.File = ???
+        def size(): Int = 0
+      }
+      bridge.run(sourcePath, true, args.toArray, launcher, launcherVmOptions, callback)
+    } catch { case ite: java.lang.reflect.InvocationTargetException => throw ite.getCause }
   }
-
 }

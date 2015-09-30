@@ -13,7 +13,7 @@ import xsbt.test.{ CommentHandler, FileCommands, ScriptRunner, TestScriptParser 
 import IO.wrapNull
 
 final class ScriptedTests(resourceBaseDirectory: File, bufferLog: Boolean, launcher: File, launchOpts: Seq[String]) {
-  import ScriptedTests.emptyCallback
+  import ScriptedTests._
   private val testResources = new Resources(resourceBaseDirectory)
 
   val ScriptFilename = "test"
@@ -40,12 +40,13 @@ final class ScriptedTests(resourceBaseDirectory: File, bufferLog: Boolean, launc
             None
           } else {
             try { scriptedTest(str, testDirectory, prescripted, log); None }
-            catch { case e: xsbt.test.TestException => Some(str) }
+            catch { case _: xsbt.test.TestException | _: PendingTestSuccessException => Some(str) }
           }
         }
       }
     }
   }
+
   private def scriptedTest(label: String, testDirectory: File, prescripted: File => Unit, log: Logger): Unit =
     {
       val buffered = new BufferedLogger(new FullLogger(log))
@@ -71,7 +72,7 @@ final class ScriptedTests(resourceBaseDirectory: File, bufferLog: Boolean, launc
           val parser = createParser()
           run(parser.parse(file))
         }
-      def testFailed() {
+      def testFailed(): Unit = {
         if (pending) buffered.clear() else buffered.stop()
         buffered.error("x " + label + pendingString)
       }
@@ -80,6 +81,7 @@ final class ScriptedTests(resourceBaseDirectory: File, bufferLog: Boolean, launc
         prescripted(testDirectory)
         runTest()
         buffered.info("+ " + label + pendingString)
+        if (pending) throw new PendingTestSuccessException(label)
       } catch {
         case e: xsbt.test.TestException =>
           testFailed()
@@ -88,16 +90,20 @@ final class ScriptedTests(resourceBaseDirectory: File, bufferLog: Boolean, launc
             case _                                  => e.printStackTrace
           }
           if (!pending) throw e
+        case e: PendingTestSuccessException =>
+          testFailed()
+          buffered.error("  Mark as passing to remove this failure.")
+          throw e
         case e: Exception =>
           testFailed()
           if (!pending) throw e
       } finally { buffered.clear() }
     }
 }
-object ScriptedTests {
-  val emptyCallback: File => Unit = { _ => () }
 
-  def main(args: Array[String]) {
+object ScriptedTests extends ScriptedRunner {
+  val emptyCallback: File => Unit = { _ => () }
+  def main(args: Array[String]): Unit = {
     val directory = new File(args(0))
     val buffer = args(1).toBoolean
     val sbtVersion = args(2)
@@ -108,14 +114,29 @@ object ScriptedTests {
     val logger = ConsoleLogger()
     run(directory, buffer, tests, logger, bootProperties, Array(), emptyCallback)
   }
+}
+
+class ScriptedRunner {
+  import ScriptedTests._
+
+  @deprecated("No longer used", "0.13.9")
   def run(resourceBaseDirectory: File, bufferLog: Boolean, tests: Array[String], bootProperties: File,
     launchOpts: Array[String]): Unit =
     run(resourceBaseDirectory, bufferLog, tests, ConsoleLogger(), bootProperties, launchOpts, emptyCallback) //new FullLogger(Logger.xlog2Log(log)))
 
+  // This is called by project/Scripted.scala
+  // Using java.util.List[File] to encode File => Unit
+  def run(resourceBaseDirectory: File, bufferLog: Boolean, tests: Array[String], bootProperties: File,
+    launchOpts: Array[String], prescripted: java.util.List[File]): Unit =
+    run(resourceBaseDirectory, bufferLog, tests, ConsoleLogger(), bootProperties, launchOpts,
+      { f: File => prescripted.add(f); () }) //new FullLogger(Logger.xlog2Log(log)))
+
+  @deprecated("No longer used", "0.13.9")
   def run(resourceBaseDirectory: File, bufferLog: Boolean, tests: Array[String], bootProperties: File,
     launchOpts: Array[String], prescripted: File => Unit): Unit =
-    run(resourceBaseDirectory, bufferLog, tests, ConsoleLogger(), bootProperties, launchOpts, prescripted) //new FullLogger(Logger.xlog2Log(log)))
+    run(resourceBaseDirectory, bufferLog, tests, ConsoleLogger(), bootProperties, launchOpts, prescripted)
 
+  @deprecated("No longer used", "0.13.9")
   def run(resourceBaseDirectory: File, bufferLog: Boolean, tests: Array[String], logger: AbstractLogger, bootProperties: File,
     launchOpts: Array[String]): Unit =
     run(resourceBaseDirectory, bufferLog, tests, logger, bootProperties, launchOpts, emptyCallback)
@@ -129,7 +150,7 @@ object ScriptedTests {
     }
     runAll(allTests)
   }
-  def runAll(tests: Seq[() => Option[String]]) {
+  def runAll(tests: Seq[() => Option[String]]): Unit = {
     val errors = for (test <- tests; err <- test()) yield err
     if (errors.nonEmpty)
       sys.error(errors.mkString("Failed tests:\n\t", "\n\t", "\n"))
@@ -192,4 +213,8 @@ object CompatibilityLevel extends Enumeration {
       case Minimal27 => "2.7.7"
       case Minimal28 => "2.8.1"
     }
+}
+class PendingTestSuccessException(label: String) extends Exception {
+  override def getMessage: String =
+    s"The pending test $label succeeded. Mark this test as passing to remove this failure."
 }

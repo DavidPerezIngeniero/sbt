@@ -83,9 +83,8 @@ class MakePom(val log: Logger) {
     write(process(toPom(ivy, module, moduleInfo, configurations, includeTypes, extra, filterRepositories, allRepositories)), output)
   // use \n as newline because toString uses PrettyPrinter, which hard codes line endings to be \n
   def write(node: XNode, output: File): Unit = write(toString(node), output, "\n")
-  def write(xmlString: String, output: File, newline: String) {
+  def write(xmlString: String, output: File, newline: String): Unit =
     IO.write(output, "<?xml version='1.0' encoding='" + IO.utf8.name + "'?>" + newline + xmlString)
-  }
 
   def toString(node: XNode): String = new PrettyPrinter(1000, 4).format(node)
   @deprecated("Use `toPom(Ivy, ModuleDescriptor, ModuleInfo, Option[Iterable[Configuration]], Set[String], NodeSeq, MavenRepository => Boolean, Boolean)` instead", "0.11.2")
@@ -236,21 +235,30 @@ class MakePom(val log: Logger) {
   def makeDependency(dependency: DependencyDescriptor, includeTypes: Set[String]): NodeSeq =
     makeDependency(dependency, includeTypes, Nil)
 
-  def makeDependency(dependency: DependencyDescriptor, includeTypes: Set[String], excludes: Seq[ExcludeRule]): NodeSeq =
-    {
-      val artifacts = dependency.getAllDependencyArtifacts
-      val includeArtifacts = artifacts.filter(d => includeTypes(d.getType))
-      if (artifacts.isEmpty) {
-        val configs = dependency.getModuleConfigurations
-        if (configs.filterNot(Set("sources", "docs")).nonEmpty) {
-          val (scope, optional) = getScopeAndOptional(dependency.getModuleConfigurations)
-          makeDependencyElem(dependency, scope, optional, None, None, excludes)
-        } else NodeSeq.Empty
-      } else if (includeArtifacts.isEmpty)
-        NodeSeq.Empty
-      else
-        NodeSeq.fromSeq(artifacts.flatMap(a => makeDependencyElem(dependency, a, excludes)))
+  def makeDependency(dependency: DependencyDescriptor, includeTypes: Set[String], excludes: Seq[ExcludeRule]): NodeSeq = {
+    def warnIntransitve(): Unit =
+      if (!dependency.isTransitive)
+        log.warn(
+          s"""Translating intransitive dependency (${dependency.getDependencyId}) into pom.xml, but maven does not support intransitive dependencies.
+             |  Please use exclusions instead so transitive dependencies will be correctly excluded in dependent projects.
+           """.stripMargin)
+      else ()
+    val artifacts = dependency.getAllDependencyArtifacts
+    val includeArtifacts = artifacts.filter(d => includeTypes(d.getType))
+    if (artifacts.isEmpty) {
+      val configs = dependency.getModuleConfigurations
+      if (!configs.forall(Set("sources", "docs"))) {
+        warnIntransitve()
+        val (scope, optional) = getScopeAndOptional(dependency.getModuleConfigurations)
+        makeDependencyElem(dependency, scope, optional, None, None, excludes)
+      } else NodeSeq.Empty
+    } else if (includeArtifacts.isEmpty) {
+      NodeSeq.Empty
+    } else {
+      warnIntransitve()
+      NodeSeq.fromSeq(artifacts.flatMap(a => makeDependencyElem(dependency, a, excludes)))
     }
+  }
 
   @deprecated("Use `makeDependencyElem` variant which takes excludes", "0.13.9")
   def makeDependencyElem(dependency: DependencyDescriptor, artifact: DependencyArtifactDescriptor): Option[Elem] =
@@ -262,7 +270,7 @@ class MakePom(val log: Logger) {
         case Nil | "*" :: Nil => dependency.getModuleConfigurations
         case x                => x.toArray
       }
-      if (configs.filterNot(Set("sources", "docs")).nonEmpty) {
+      if (!configs.forall(Set("sources", "docs"))) {
         val (scope, optional) = getScopeAndOptional(configs)
         val classifier = artifactClassifier(artifact)
         val baseType = artifactType(artifact)

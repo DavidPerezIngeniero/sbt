@@ -134,7 +134,7 @@ object BasicCommands {
   private[this] def className: Parser[String] =
     {
       val base = StringBasic & not('-' ~> any.*, "Class name cannot start with '-'.")
-      def single(s: String) = Completions.single(Completion.displayStrict(s))
+      def single(s: String) = Completions.single(Completion.displayOnly(s))
       val compl = TokenCompletions.fixed((seen, level) => if (seen.startsWith("-")) Completions.nil else single("<class name>"))
       token(base, compl)
     }
@@ -274,7 +274,7 @@ object BasicCommands {
     val aliasRemoved = removeAlias(state, name)
     // apply the alias value to the commands of `state` except for the alias to avoid recursion (#933)
     val partiallyApplied = Parser(Command.combine(aliasRemoved.definedCommands)(aliasRemoved))(value)
-    val arg = matched(partiallyApplied & (success() | (SpaceClass ~ any.*)))
+    val arg = matched(partiallyApplied & (success(()) | (SpaceClass ~ any.*)))
     // by scheduling the expanded alias instead of directly executing, we get errors on the expanded string (#598)
     arg.map(str => () => (value + str) :: state)
   }

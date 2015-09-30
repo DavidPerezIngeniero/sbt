@@ -232,7 +232,8 @@ object Defaults extends BuildCommon {
     clean := {
       val _ = clean.value
       IvyActions.cleanCachedResolutionCache(ivyModule.value, streams.value.log)
-    }
+    },
+    scalaCompilerBridgeSource := ModuleID(xsbti.ArtifactInfo.SbtOrganization, "compiler-interface", sbtVersion.value, Some("component")).sources()
   )
   // must be a val: duplication detected by object identity
   private[this] lazy val compileBaseGlobal: Seq[Setting[_]] = globalDefaults(Seq(
@@ -261,7 +262,7 @@ object Defaults extends BuildCommon {
       if (plugin) scalaBase / ("sbt-" + sbtv) else scalaBase
     }
 
-  def compilersSetting = compilers := Compiler.compilers(scalaInstance.value, classpathOptions.value, javaHome.value)(appConfiguration.value, streams.value.log)
+  def compilersSetting = compilers := Compiler.compilers(scalaInstance.value, classpathOptions.value, javaHome.value, ivyConfiguration.value, scalaCompilerBridgeSource.value)(appConfiguration.value, streams.value.log)
 
   lazy val configTasks = docTaskSettings(doc) ++ inTask(compile)(compileInputsSettings) ++ configGlobal ++ compileAnalysisSettings ++ Seq(
     compile <<= compileTask,
@@ -413,7 +414,7 @@ object Defaults extends BuildCommon {
     definedTests <<= detectTests,
     definedTestNames <<= definedTests map (_.map(_.name).distinct) storeAs definedTestNames triggeredBy compile,
     testFilter in testQuick <<= testQuickFilter,
-    executeTests <<= (streams in test, loadedTestFrameworks, testLoader, testGrouping in test, testExecution in test, fullClasspath in test, javaHome in test, testForkedParallel) flatMap allTestGroupsTask,
+    executeTests <<= (streams in test, loadedTestFrameworks, testLoader, testGrouping in test, testExecution in test, fullClasspath in test, javaHome in test, testForkedParallel, javaOptions in test) flatMap allTestGroupsTask,
     testResultLogger in (Test, test) :== TestResultLogger.SilentWhenNoTests, // https://github.com/sbt/sbt/issues/1185
     test := {
       val trl = (testResultLogger in (Test, test)).value
@@ -519,7 +520,7 @@ object Defaults extends BuildCommon {
         implicit val display = Project.showContextKey(state.value)
         val modifiedOpts = Tests.Filters(filter(selected)) +: Tests.Argument(frameworkOptions: _*) +: config.options
         val newConfig = config.copy(options = modifiedOpts)
-        val output = allTestGroupsTask(s, loadedTestFrameworks.value, testLoader.value, testGrouping.value, newConfig, fullClasspath.value, javaHome.value, testForkedParallel.value)
+        val output = allTestGroupsTask(s, loadedTestFrameworks.value, testLoader.value, testGrouping.value, newConfig, fullClasspath.value, javaHome.value, testForkedParallel.value, javaOptions.value)
         val taskName = display(resolvedScoped.value)
         val trl = testResultLogger.value
         val processed = output.map(out => trl.run(s.log, out, taskName))
@@ -542,19 +543,27 @@ object Defaults extends BuildCommon {
   }
 
   def allTestGroupsTask(s: TaskStreams, frameworks: Map[TestFramework, Framework], loader: ClassLoader, groups: Seq[Tests.Group], config: Tests.Execution, cp: Classpath, javaHome: Option[File]): Task[Tests.Output] = {
-    allTestGroupsTask(s, frameworks, loader, groups, config, cp, javaHome, forkedParallelExecution = false)
+    allTestGroupsTask(s, frameworks, loader, groups, config, cp, javaHome, forkedParallelExecution = false, javaOptions = Nil)
   }
 
   def allTestGroupsTask(s: TaskStreams, frameworks: Map[TestFramework, Framework], loader: ClassLoader, groups: Seq[Tests.Group], config: Tests.Execution, cp: Classpath, javaHome: Option[File], forkedParallelExecution: Boolean): Task[Tests.Output] = {
+    allTestGroupsTask(s, frameworks, loader, groups, config, cp, javaHome, forkedParallelExecution, javaOptions = Nil)
+  }
+
+  def allTestGroupsTask(s: TaskStreams, frameworks: Map[TestFramework, Framework], loader: ClassLoader, groups: Seq[Tests.Group], config: Tests.Execution, cp: Classpath, javaHome: Option[File], forkedParallelExecution: Boolean, javaOptions: Seq[String]): Task[Tests.Output] = {
     val runners = createTestRunners(frameworks, loader, config)
     val groupTasks = groups map {
       case Tests.Group(name, tests, runPolicy) =>
         runPolicy match {
           case Tests.SubProcess(opts) =>
+            s.log.debug(s"javaOptions: ${opts.runJVMOptions}")
             val forkedConfig = config.copy(parallel = config.parallel && forkedParallelExecution)
             s.log.debug(s"Forking tests - parallelism = ${forkedConfig.parallel}")
             ForkTests(runners, tests.toList, forkedConfig, cp.files, opts, s.log) tag Tags.ForkedTestGroup
           case Tests.InProcess =>
+            if (javaOptions.nonEmpty) {
+              s.log.warn("javaOptions will be ignored, fork is set to false")
+            }
             Tests(frameworks, loader, runners, tests, config, s.log)
         }
     }
@@ -627,12 +636,12 @@ object Defaults extends BuildCommon {
 
   // drop base directories, since there are no valid mappings for these
   def sourceMappings = (unmanagedSources, unmanagedSourceDirectories, baseDirectory) map { (srcs, sdirs, base) =>
-    ((srcs --- sdirs --- base) pair (relativeTo(sdirs) | relativeTo(base) | flat)) toSeq
+    (srcs --- sdirs --- base) pair (relativeTo(sdirs) | relativeTo(base) | flat)
   }
   def resourceMappings = relativeMappings(unmanagedResources, unmanagedResourceDirectories)
   def relativeMappings(files: ScopedTaskable[Seq[File]], dirs: ScopedTaskable[Seq[File]]): Initialize[Task[Seq[(File, String)]]] =
     (files, dirs) map { (rs, rdirs) =>
-      (rs --- rdirs) pair (relativeTo(rdirs) | flat) toSeq
+      (rs --- rdirs) pair (relativeTo(rdirs) | flat)
     }
 
   def collectFiles(dirs: ScopedTaskable[Seq[File]], filter: ScopedTaskable[FileFilter], excludes: ScopedTaskable[FileFilter]): Initialize[Task[Seq[File]]] =
@@ -738,8 +747,23 @@ object Defaults extends BuildCommon {
   def runnerTask = runner <<= runnerInit
   def runnerInit: Initialize[Task[ScalaRun]] = Def.task {
     val tmp = taskTemporaryDirectory.value
+    val resolvedScope = resolvedScoped.value.scope
+    val structure = buildStructure.value
     val si = scalaInstance.value
-    if (fork.value) new ForkRun(forkOptions.value) else new Run(si, trapExit.value, tmp)
+    val s = streams.value
+    val options = javaOptions.value
+    if (fork.value) {
+      s.log.debug(s"javaOptions: $options")
+      new ForkRun(forkOptions.value)
+    } else {
+      if (options.nonEmpty) {
+        val mask = ScopeMask(project = false)
+        val showJavaOptions = Scope.displayMasked((javaOptions in resolvedScope).scopedKey.scope, (javaOptions in resolvedScope).key.label, mask)
+        val showFork = Scope.displayMasked((fork in resolvedScope).scopedKey.scope, (fork in resolvedScope).key.label, mask)
+        s.log.warn(s"$showJavaOptions will be ignored, $showFork is set to false")
+      }
+      new Run(si, trapExit.value, tmp)
+    }
   }
 
   @deprecated("Use `docTaskSettings` instead", "0.12.0")
@@ -980,6 +1004,7 @@ object Defaults extends BuildCommon {
     )
   @deprecated("Default settings split into coreDefaultSettings and IvyModule/JvmModule plugins.", "0.13.2")
   lazy val defaultSettings: Seq[Setting[_]] = projectBaseSettings ++ defaultConfigs
+
 }
 object Classpaths {
   import Path._
@@ -1157,7 +1182,7 @@ object Classpaths {
       (confs ++ confs.map(internalConfigurationMap.value) ++ (if (autoCompilerPlugins.value) CompilerPlugin :: Nil else Nil)).distinct
     },
     ivyConfigurations ++= Configurations.auxiliary,
-    ivyConfigurations ++= { if (managedScalaInstance.value && !scalaHome.value.isDefined) Configurations.ScalaTool :: Nil else Nil },
+    ivyConfigurations ++= { if (managedScalaInstance.value && scalaHome.value.isEmpty) Configurations.ScalaTool :: Nil else Nil },
     moduleSettings <<= moduleSettings0,
     makePomConfiguration := new MakePomConfiguration(artifactPath in makePom value, projectInfo.value, None, pomExtra.value, pomPostProcess.value, pomIncludeRepository.value, pomAllRepositories.value),
     deliverLocalConfiguration := deliverConfig(crossTarget.value, status = if (isSnapshot.value) "integration" else "release", logging = ivyLoggingLevel.value),
@@ -1215,7 +1240,7 @@ object Classpaths {
   )
 
   val jvmBaseSettings: Seq[Setting[_]] = Seq(
-    libraryDependencies ++= autoLibraryDependency(autoScalaLibrary.value && !scalaHome.value.isDefined && managedScalaInstance.value, sbtPlugin.value, scalaOrganization.value, scalaVersion.value),
+    libraryDependencies ++= autoLibraryDependency(autoScalaLibrary.value && scalaHome.value.isEmpty && managedScalaInstance.value, sbtPlugin.value, scalaOrganization.value, scalaVersion.value),
     // Override the default to handle mixing in the sbtPlugin + scala dependencies.
     allDependencies := {
       val base = projectDependencies.value ++ libraryDependencies.value
@@ -1229,7 +1254,7 @@ object Classpaths {
   @deprecated("Split into ivyBaseSettings and jvmBaseSettings.", "0.13.2")
   val baseSettings: Seq[Setting[_]] = ivyBaseSettings ++ jvmBaseSettings
 
-  def warnResolversConflict(ress: Seq[Resolver], log: Logger) {
+  def warnResolversConflict(ress: Seq[Resolver], log: Logger): Unit = {
     val resset = ress.toSet
     for ((name, r) <- resset groupBy (_.name) if r.size > 1) {
       log.warn("Multiple resolvers having different access mechanism configured with same name '" + name + "'. To avoid conflict, Remove duplicate project resolvers (`resolvers`) or rename publishing resolver (`publishTo`).")
@@ -1564,7 +1589,7 @@ object Classpaths {
   def interSort(projectRef: ProjectRef, conf: Configuration, data: Settings[Scope], deps: BuildDependencies): Seq[(ProjectRef, String)] =
     {
       val visited = asScalaSet(new LinkedHashSet[(ProjectRef, String)])
-      def visit(p: ProjectRef, c: Configuration) {
+      def visit(p: ProjectRef, c: Configuration): Unit = {
         val applicableConfigs = allConfigs(c)
         for (ac <- applicableConfigs) // add all configurations in this project
           visited add (p -> ac.name)
@@ -1853,7 +1878,7 @@ trait BuildExtra extends BuildCommon with DefExtra {
   def addArtifact(a: Artifact, taskDef: TaskKey[File]): SettingsDefinition =
     {
       val pkgd = packagedArtifacts := packagedArtifacts.value updated (a, taskDef.value)
-      seq(artifacts += a, pkgd)
+      Seq(artifacts += a, pkgd)
     }
   /** Constructs a setting that declares a new artifact `artifact` that is generated by `taskDef`. */
   def addArtifact(artifact: Initialize[Artifact], taskDef: Initialize[Task[File]]): SettingsDefinition =
@@ -1862,7 +1887,7 @@ trait BuildExtra extends BuildCommon with DefExtra {
       val taskLocal = TaskKey.local[File]
       val art = artifacts := artLocal.value +: artifacts.value
       val pkgd = packagedArtifacts := packagedArtifacts.value updated (artLocal.value, taskLocal.value)
-      seq(artLocal := artifact.value, taskLocal := taskDef.value, art, pkgd)
+      Seq(artLocal := artifact.value, taskLocal := taskDef.value, art, pkgd)
     }
 
   // because this was commonly used, this might need to be kept longer than usual
