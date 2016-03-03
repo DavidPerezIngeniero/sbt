@@ -7,7 +7,7 @@ import Sxr.sxr
 // but can be shared across the multi projects.
 def buildLevelSettings: Seq[Setting[_]] = inThisBuild(Seq(
   organization := "org.scala-sbt",
-  version := "0.13.10-SNAPSHOT",
+  version := "0.13.12-SNAPSHOT",
   bintrayOrganization := Some(if (publishStatus.value == "releases") "typesafe" else "sbt"),
   bintrayRepository := s"ivy-${publishStatus.value}",
   bintrayPackage := "sbt",
@@ -519,7 +519,7 @@ lazy val safeUnitTests = taskKey[Unit]("Known working tests (for both 2.10 and 2
 lazy val safeProjects: ScopeFilter = ScopeFilter(
   inProjects(mainSettingsProj, mainProj, ivyProj, completeProj,
     actionsProj, classpathProj, collectionProj, compileIncrementalProj,
-    logProj, runProj, stdTaskProj, compilerProj),
+    logProj, runProj, stdTaskProj, compilerProj, compileInterfaceProj),
   inConfigurations(Test)
 )
 lazy val otherUnitTests = taskKey[Unit]("Unit test other projects")
@@ -569,10 +569,10 @@ def customCommands: Seq[Setting[_]] = Seq(
   },
   /** There are several complications with sbt's build.
    * First is the fact that interface project is a Java-only project
-   * that uses source generator from datatype subproject in Scala 2.10.5.
+   * that uses source generator from datatype subproject in Scala 2.10.6.
    *
    * Second is the fact that all subprojects are released with crossPaths
-   * turned off for the sbt's Scala version 2.10.5, but some of them are also
+   * turned off for the sbt's Scala version 2.10.6, but some of them are also
    * cross published against 2.11.1 with crossPaths turned on.
    *
    * `so compile` handles 2.10.x/2.11.x cross building.
