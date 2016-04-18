@@ -164,7 +164,7 @@ object EvaluateTask {
 
   private[sbt] def defaultProgress: ExecuteProgress[Task] =
     if (java.lang.Boolean.getBoolean("sbt.task.timings")) {
-      if (java.lang.Boolean.getBoolean("sbt.task.timings.on.shutdown"))
+      if (java.lang.Boolean.getBoolean("sbt.task.timings.shutdown"))
         sharedProgress
       else
         new TaskTimings(shutdown = false)
